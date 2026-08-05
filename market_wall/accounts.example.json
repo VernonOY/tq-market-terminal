@@ -1,0 +1,8 @@
+[
+  {"id": "sim", "kind": "sim", "name": "本地模拟", "init_balance": 1000000},
+
+  {"id": "kq", "kind": "kq", "name": "快期模拟"},
+
+  {"id": "real", "kind": "real", "name": "实盘",
+   "broker_id": "期货公司名", "account_id": "资金账号", "password": "交易密码"}
+]

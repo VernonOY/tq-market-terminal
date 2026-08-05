@@ -1,0 +1,24 @@
+# 凭证 —— 绝不能提交
+tq_auth.env
+*.env
+!*.env.example
+market_wall/accounts.json
+accounts.json
+
+# 用户数据与缓存
+market_wall/watchlist.json
+market_wall/*_cache.json
+market_wall/tscache/
+market_wall/nav/
+market_wall/static/*.gz
+market_wall/libhfcalc.dylib
+market_wall/libhfcalc.so
+
+# 策略运行产物
+Trade/state/
+Trade/logs/
+
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

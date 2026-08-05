@@ -1,0 +1,5 @@
+tqsdk>=3.10.1
+aiohttp>=3.9
+certifi
+numpy          # server.py 用于 K 线/指标的数组运算
+scipy          # 期权 IV 求解 (brentq)

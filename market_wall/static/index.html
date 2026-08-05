@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>行情终端</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">行情终端 <span class="sub">TqSdk</span></div>
+  <nav id="nav-top">
+    <button data-grp="home">首页</button>
+    <button data-grp="fut" class="on">期货</button>
+    <button data-grp="opt">期权</button>
+    <button data-grp="stk">A股</button>
+    <button data-grp="trade">交易</button>
+  </nav>
+  <div id="search-box">
+    <input id="search-input" type="text" placeholder="搜索全市场: 代码或名称 (如 cu2609 / 茅台 / 600519)" autocomplete="off">
+    <div id="search-results"></div>
+  </div>
+  <div class="conn"><span id="conn-dot" class="dot"></span><span id="conn-text">连接中…</span></div>
+</header>
+<nav id="nav-sub"></nav>
+
+<!-- ============ 首页总览 ============ -->
+<div id="home-wrap" class="view hidden"><section id="home-view"></section></div>
+<div id="watch-wrap" class="view hidden"><section id="watch-view"></section></div>
+<!-- ============ 交易: 账户 / 净值 / 策略 ============ -->
+<div id="acct-wrap" class="view hidden"><section id="acct-view"></section></div>
+<div id="nav-wrap" class="view hidden"><section id="navchart-view"></section></div>
+<div id="strat-wrap" class="view hidden"><section id="strat-view"></section></div>
+<!-- ============ 多图视图 ============ -->
+<div id="multi-wrap" class="view hidden"><section id="multi-view"></section></div>
+<!-- ============ 分区看板视图 ============ -->
+<div id="sector-wrap" class="view hidden"><section id="sector-view"></section></div>
+<!-- ============ 主力合约看板视图 ============ -->
+<div id="board-wrap" class="view hidden"><section id="board-view"></section></div>
+<!-- ============ 期权视图 ============ -->
+<div id="option-wrap" class="view hidden"><section id="option-view"></section></div>
+<!-- ============ 股票板块/指数视图 ============ -->
+<div id="sboard-wrap" class="view hidden"><section id="sboard-view"></section></div>
+<!-- ============ 个股视图 ============ -->
+<div id="stock-wrap" class="view hidden">
+  <section>
+    <div id="stock-pick">
+      <span class="sp-label">研究标的</span>
+      <div class="sp-box">
+        <input id="sp-input" placeholder="搜索股票: 代码或名称 (如 600519 / 茅台 / 宁德)" autocomplete="off">
+        <div id="sp-results"></div>
+      </div>
+      <div id="sp-chips"></div>
+    </div>
+    <div id="stock-view"></div>
+  </section>
+</div>
+
+<!-- ============ 行情视图 ============ -->
+<main id="layout" class="view">
+  <aside id="wall-col">
+    <div id="wall-filter"></div>
+    <div id="group-tabs"></div>
+    <div id="wall"></div>
+  </aside>
+  <div class="splitter" id="split-l" title="拖动调整宽度 / 双击折叠"></div>
+
+  <section id="center">
+    <div id="chart-toolbar">
+      <div id="chart-title">—</div>
+      <div class="periods" id="periods">
+        <button data-dur="-1">分时</button>
+        <button data-dur="60" class="on">1m</button>
+        <button data-dur="180">3m</button>
+        <button data-dur="300">5m</button>
+        <button data-dur="900">15m</button>
+        <button data-dur="1800">30m</button>
+        <button data-dur="3600">1h</button>
+        <button data-dur="86400">日K</button>
+        <button data-dur="604800">周K</button>
+        <button data-dur="2592000">月K</button>
+      </div>
+      <div class="indicators" id="indicators">
+        <button data-ind="ma" class="on">MA</button>
+        <button data-ind="boll">BOLL</button>
+        <button data-ind="kc" title="波动率通道 Keltner: EMA ± 倍数×ATR">波动带</button>
+        <button data-ind="vol" class="on">VOL</button>
+        <button data-ind="macd" class="on">副图</button>
+      </div>
+      <button id="param-btn" title="指标参数设置">⚙ 参数</button>
+      <button id="alert-btn" title="设置价格预警">🔔 预警</button>
+    </div>
+    <div id="overlay-bar" class="hidden"></div>
+    <div id="chart-area">
+      <div id="draw-tools">
+        <button data-tool="cursor" class="on" title="光标 (缩放/看K线详情)">✛</button>
+        <button data-tool="trend" title="趋势线">╱</button>
+        <button data-tool="hline" title="水平线">─</button>
+        <button data-tool="vline" title="垂直线">│</button>
+        <button data-tool="rect" title="矩形">▭</button>
+        <button data-tool="text" title="文字标注">T</button>
+        <div class="tool-sep"></div>
+        <button data-act="snap" class="on" title="吸附到蜡烛的开/高/低/收 (按住 Alt 临时关闭)">🧲</button>
+        <div class="tool-sep"></div>
+        <button data-act="delete" title="删除选中 (Delete)">✕</button>
+        <button data-act="clear" title="清空本图标注">🗑</button>
+      </div>
+      <div id="chart-main-col">
+        <div id="ohlc-legend"></div>
+        <div id="ma-legend"></div>
+        <div id="hist-hint" class="hidden"></div>
+        <div id="chart-stack">
+          <div id="main-chart"></div>
+          <canvas id="draw-canvas"></canvas>
+          <div id="bar-detail" class="hidden"></div>
+          <div id="chart-loading" class="hidden"><span></span>加载中…</div>
+          <div id="ts-host" class="hidden"></div>
+        </div>
+        <div id="vol-legend"></div>
+        <div id="macd-wrap" class="subpane">
+          <div id="macd-legend"></div>
+          <div id="macd-chart"></div>
+          <button class="sub-gear" data-slot="0" title="副图设置">⚙</button>
+        </div>
+        <div id="sub2-wrap" class="subpane hidden">
+          <div id="sub2-legend"></div>
+          <div id="sub2-chart"></div>
+          <button class="sub-gear" data-slot="1" title="副图设置">⚙</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="splitter" id="split-r" title="拖动调整宽度 / 双击折叠"></div>
+  <aside id="right">
+    <section class="rp" data-rp="book">
+      <div class="rp-h">盘口<i>▾</i></div>
+      <div class="rp-b">
+        <div id="book"></div>
+        <canvas id="depth-canvas" width="280" height="58"></canvas>
+        <div id="depth-note" class="note"></div>
+      </div>
+    </section>
+
+    <section class="rp" data-rp="hf">
+      <div class="rp-h">高频指标<span class="rp-tag" id="hf-engine">C++</span><i>▾</i></div>
+      <div class="rp-b"><div id="hf-grid"><div class="note">等待逐笔数据…</div></div></div>
+    </section>
+
+    <section class="rp" data-rp="vol">
+      <div class="rp-h">实时波动率<span class="rp-tag">年化</span><i>▾</i></div>
+      <div class="rp-b"><div id="vol-table"><div class="note">等待逐笔数据…</div></div></div>
+    </section>
+
+    <section class="rp" data-rp="tape">
+      <div class="rp-h">分时成交<span class="rp-tag">快照差分推断开平</span><i>▾</i></div>
+      <div class="rp-b">
+        <div id="tape-head" class="tape-row tape-hd"><span>时间</span><span>价格</span><span>手数</span><span>性质</span><span>仓差</span></div>
+        <div id="tick-tape"></div>
+      </div>
+    </section>
+
+    <section class="rp" data-rp="tick">
+      <div class="rp-h">Tick 走势<i>▾</i></div>
+      <div class="rp-b"><canvas id="tick-canvas" width="280" height="68"></canvas></div>
+    </section>
+
+    <section class="rp" data-rp="info">
+      <div class="rp-h">合约信息<i>▾</i></div>
+      <div class="rp-b"><div id="quote-detail"></div></div>
+    </section>
+  </aside>
+</main>
+
+<!-- 副图设置(齿轮弹出) -->
+<div id="sub-menu" class="hidden"></div>
+<!-- 框选统计结果 -->
+<div id="range-panel" class="hidden"></div>
+<!-- 指标参数 -->
+<div id="param-panel" class="hidden"></div>
+
+<!-- 预警面板 + 提示 -->
+<div id="alert-panel" class="hidden">
+  <div class="al-head">价格预警 <span id="al-close">✕</span></div>
+  <div class="al-sym" id="al-sym">—</div>
+  <div class="al-form">
+    <select id="al-type">
+      <option value="gt">涨破</option>
+      <option value="lt">跌破</option>
+      <option value="pct">涨跌幅达 ±</option>
+    </select>
+    <input id="al-val" type="number" step="any" placeholder="价格 / 百分比">
+    <label><input id="al-once" type="checkbox" checked>只提醒一次</label>
+    <button id="al-add">添加</button>
+  </div>
+  <div id="alert-list"></div>
+</div>
+<div id="alert-toasts"></div>
+
+<script defer src="/static/lightweight-charts.js"></script>
+<script defer src="/static/board.js"></script>
+<script defer src="/static/sector.js"></script>
+<script defer src="/static/multi.js"></script>
+<script defer src="/static/timeshare.js"></script>
+<script defer src="/static/option.js"></script>
+<script defer src="/static/stock.js"></script>
+<script defer src="/static/stockboard.js"></script>
+<script defer src="/static/home.js"></script>
+<script defer src="/static/watch.js"></script>
+<script defer src="/static/account.js"></script>
+<script defer src="/static/navchart.js"></script>
+<script defer src="/static/strategy.js"></script>
+<script defer src="/static/app.js"></script>
+</body>
+</html>
