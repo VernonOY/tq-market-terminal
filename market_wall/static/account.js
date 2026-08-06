@@ -132,7 +132,7 @@ table.ac-t .sym:hover{text-decoration:underline}
       t.innerHTML = `<div class="n">${a.name || a.id}${badge}</div>` +
         `<div class="b">${money(sum.balance)}</div>` +
         `<div class="d ${cls(day)}">当日 ${signed(day)}</div>`;
-      t.onclick = () => { curId = a.id; trades = orders = null; build(); };
+      t.onclick = () => { curId = a.id; dropTables(); build(); };
       bar.appendChild(t);
     }
     return bar;
@@ -154,7 +154,13 @@ table.ac-t .sym:hover{text-decoration:underline}
   function cardValue(sum, k) {
     if (k === "day") {
       const a = num(sum.balance), b = num(sum.pre_balance);
-      return (a == null || b == null) ? null : a - b;
+      if (a != null && b != null) return a - b;
+      // 策略账户不报 pre_balance（TqSim 当日建当日销），最大的那张卡会恒为「—」。
+      // 用「平仓盈亏 − 手续费 + 浮动盈亏」兜底, 与 trade.js 的 dayPnl 保持一致。
+      if (num(sum.close_profit) != null || num(sum.float_profit) != null)
+        return (num(sum.close_profit) || 0) - (num(sum.commission) || 0)
+          + (num(sum.float_profit) || 0);
+      return null;
     }
     return num(sum[k]);
   }
@@ -346,6 +352,11 @@ table.ac-t .sym:hover{text-decoration:underline}
     offset: "开平", price: "成交价", volume: "手数", trade_id: "成交号", order_id: "委托号",
     price_type: "类型", limit_price: "委托价", volume_orign: "委托量", volume_left: "未成",
     trade_price: "成交价", status: "状态", last_msg: "信息", exchange_order_id: "交易所单号",
+    // 策略账户的委托/成交走的是策略自报的列(strategy_runner._TRD_COLS)，
+    // 跟 TqSdk 那套完全不同名。不补这一段, 表头就是一排英文原名。
+    code: "品种", side: "方向", z: "信号z", entry_time: "开仓时间",
+    entry_price: "开仓价", entry_passive: "进场被动", exit_time: "平仓时间",
+    exit_price: "平仓价", exit_passive: "出场被动",
   };
   const DIR_CN = { BUY: "买", SELL: "卖" };
   const OFF_CN = { OPEN: "开", CLOSE: "平", CLOSETODAY: "平今", CLOSEYESTERDAY: "平昨" };
@@ -354,6 +365,16 @@ table.ac-t .sym:hover{text-decoration:underline}
       const n = num(v);
       td.textContent = n == null ? "—" : new Date(n * 1000).toLocaleTimeString("zh-CN", { hour12: false });
       td.title = n == null ? "" : new Date(n * 1000).toLocaleString("zh-CN", { hour12: false });
+      return;
+    }
+    if (col === "side") {                      // 策略用 +1/-1 表示多空
+      const n = num(v);
+      td.textContent = n == null ? "—" : n > 0 ? "买" : n < 0 ? "卖" : "—";
+      td.className = n > 0 ? "ac-dir-l" : n < 0 ? "ac-dir-s" : "";
+      return;
+    }
+    if (col === "entry_passive" || col === "exit_passive") {
+      td.textContent = v === true ? "被动" : v === false ? "穿价" : "—";
       return;
     }
     if (col === "direction") {
@@ -366,15 +387,35 @@ table.ac-t .sym:hover{text-decoration:underline}
     if (typeof v === "number") { td.textContent = isFinite(v) ? v : "—"; return; }
     td.textContent = (v === null || v === undefined || v === "") ? "—" : String(v);
   }
+  /* ⚠️ 委托/成交是 RPC 拉的, 不在每帧的账户推送里。原来只在「展开」和
+     「已展开但无缓存」时拉一次 —— 一旦 ordersFor===curId 成立就永不再拉,
+     整晚定格在第一次的快照: 仓平了委托还挂着、新成交永远不出现。
+     这里给缓存加时间戳, tick() 里按 TTL 续拉。inflight 防重入。 */
+  const TTL = 4000;
+  let loadedAt = { ord: 0, trd: 0 };
+  let inflight = { ord: false, trd: false };
   function loadTable(key) {
-    if (!curId || !opts.request) return;
+    if (!curId || !opts.request || inflight[key]) return;
+    inflight[key] = true;
     const action = key === "ord" ? "acct_orders" : "acct_trades";
     const payload = key === "ord" ? { id: curId } : { id: curId, limit: 300 };
     opts.request(action, payload).then((r) => {
+      inflight[key] = false;
+      loadedAt[key] = Date.now();
       if (!root || curId !== r.id) return;
+      const old = key === "ord" ? orders : trades;
       if (key === "ord") { orders = r; ordersFor = r.id; } else { trades = r; tradesFor = r.id; }
-      build();
-    }).catch(() => { /* 展开时再试 */ });
+      // 行数/内容没变就别重建 DOM —— 否则每 4 秒闪一下, 还会顶掉滚动位置
+      const same = old && JSON.stringify(old.rows) === JSON.stringify(r.rows)
+        && JSON.stringify(old.cols) === JSON.stringify(r.cols);
+      if (!same) build();
+    }).catch(() => { inflight[key] = false; loadedAt[key] = Date.now(); });
+  }
+  /* 切账户时缓存必须作废, 否则会把上一个账户的委托/成交显示给新账户 */
+  function dropTables() {
+    orders = trades = null;
+    ordersFor = tradesFor = null;
+    loadedAt = { ord: 0, trd: 0 };
   }
 
   /* ---------------- 组装 ---------------- */
@@ -399,6 +440,7 @@ table.ac-t .sym:hover{text-decoration:underline}
     root.innerHTML = "";
     if (opts.fixedAccount) {
       // 外壳已选好账户, 不再显示第二个选择器
+      if (curId !== opts.fixedAccount) dropTables();   // 换账户必须弃缓存
       curId = opts.fixedAccount;
       if (!accounts.some((a) => a.id === curId)) accounts = [{ id: curId, name: curId, ok: true }];
     } else {
@@ -432,6 +474,12 @@ table.ac-t .sym:hover{text-decoration:underline}
     if (!fold.ord && !(orders && ordersFor === curId)) loadTable("ord");
     if (!fold.trd && !(trades && tradesFor === curId)) loadTable("trd");
   }
+  /* 展开着的表按 TTL 续拉。每帧调用, 真正发请求的频率由 TTL 决定 */
+  function pollTables() {
+    const now = Date.now();
+    for (const k of ["ord", "trd"])
+      if (!fold[k] && !inflight[k] && now - loadedAt[k] > TTL) loadTable(k);
+  }
 
   /* 每帧只改文字, 不重建 DOM —— 结构变了(持仓增减/账户增减)才重建 */
   let posSig = "";
@@ -441,6 +489,7 @@ table.ac-t .sym:hover{text-decoration:underline}
       raf = 0;
       const c = cur();
       if (!c) return;
+      pollTables();
       const rows = posRows();
       const sig = rows.map((r) => r.symbol + r.dir + r.vol).join(",");
       if (sig !== posSig) { posSig = sig; build(); return; }

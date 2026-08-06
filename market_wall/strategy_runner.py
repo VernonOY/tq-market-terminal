@@ -274,11 +274,37 @@ class StrategyHub:
                 "pid": self.procs[sid].pid, "log": logf.name}
 
     def stop(self, sid):
+        """停策略。
+
+        ⚠️ 不能只认 self.procs —— 那里只有**本终端 Popen 拉起**的进程。
+        命令行/定时任务起的策略（今晚这两条就是）在 procs 里查不到，
+        于是「停止」按钮必定报「未在运行」，紧急停机只能去命令行翻 pid。
+        而状态文件里本来就带着 pid，_read_all() 判存活用的也正是它 ——
+        只有 stop() 没用，这个不对称就是 bug 本身。
+        """
         proc = self.procs.get(sid)
-        if proc is None or proc.poll() is not None:
-            return {"type": "err", "msg": f"{sid} 未在运行(或不是本终端拉起的)"}
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                proc.terminate()
+            return {"type": "strat_stopped", "id": sid, "pid": proc.pid}
+
+        d = self._read_all().get(sid) or {}
+        pid = d.get("pid")
         try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return {"type": "err", "msg": f"{sid} 未在运行(状态文件里没有 pid)"}
+        try:
+            os.kill(pid, 0)                     # 先确认活着，别误杀被复用的 pid
+        except OSError:
+            return {"type": "err", "msg": f"{sid} 未在运行(pid {pid} 已退出)"}
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
         except Exception:
-            proc.terminate()
-        return {"type": "strat_stopped", "id": sid}
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError as e:
+                return {"type": "err", "msg": f"停止失败: {e}"}
+        return {"type": "strat_stopped", "id": sid, "pid": pid}
