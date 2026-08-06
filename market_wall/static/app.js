@@ -554,15 +554,8 @@ function addOverlay(sym) {
   const color = OVERLAY_COLORS[overlays.size % OVERLAY_COLORS.length];
   const o = { color, mode: ovMode(), series: null, raw: null };
   o.series = mkOverlaySeries(o);
-  chart.priceScale("cmp").applyOptions({
-    // 百分比刻度: 按当前可见区间的第一根归一, 平移时基准自动重算。
-    // 两个标的价格量级差几十倍(沪金 926 / 沪银 15000), 只有归一化后形状才可比。
-    // 轴本身不显示 —— 显示了会和主图价格轴混淆, 读数走上方的叠加条。
-    mode: LightweightCharts.PriceScaleMode.Percentage,
-    scaleMargins: { top: 0.05, bottom: 0.22 },
-    visible: false,
-  });
   overlays.set(sym, o);
+  syncCmpMode();
   send({ action: "subscribe", symbol: sym, duration: dataDuration(), overlay: true });
   renderOverlayBar();
 }
@@ -571,6 +564,7 @@ function removeOverlay(sym) {
   if (!o) return;
   try { chart.removeSeries(o.series); } catch (e) { /* 已移除 */ }
   overlays.delete(sym);
+  syncCmpMode();
   send({ action: "unfocus", symbol: sym });
   renderOverlayBar();
 }
@@ -587,7 +581,7 @@ function ovMode() {
 function mkOverlaySeries(o) {
   if (o.mode === "candle") {
     return chart.addCandlestickSeries({
-      priceScaleId: "cmp",
+      priceScaleId: "right",
       upColor: o.color, downColor: "transparent",
       borderUpColor: o.color, borderDownColor: o.color,
       wickUpColor: o.color, wickDownColor: o.color,
@@ -595,7 +589,7 @@ function mkOverlaySeries(o) {
     });
   }
   return chart.addLineSeries({
-    color: o.color, lineWidth: 2, priceScaleId: "cmp",
+    color: o.color, lineWidth: 2, priceScaleId: "right",
     lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: true,
   });
 }
@@ -608,6 +602,22 @@ function setOverlayMode(sym, mode) {
   try { localStorage.setItem(OV_MODE_KEY, mode); } catch (e) { /* 忽略 */ }
   refillOverlay(sym);
   renderOverlayBar();
+}
+/* 叠加对比的前提: 主图和叠加必须在**同一种刻度**下。
+   之前主图右轴是普通价格模式、叠加走隐藏的百分比刻度, 两条线各归一各的,
+   橙线相对蜡烛的高低毫无意义(实测左端沪金在 936、沪银线在 940 上方 ——
+   若真同基准归一, 起点应当重合)。
+   改成 TradingView 的做法: 一有叠加就把整张图切成百分比, 清空后切回价格。
+   百分比按**当前可见区间的第一根**归一, 缩放/平移时基准自动重算 ——
+   所以看的是"这个窗口内的相对涨跌", 真实价格由上方叠加条给出。 */
+function syncCmpMode() {
+  const on = overlays.size > 0;
+  try {
+    chart.priceScale("right").applyOptions({
+      mode: on ? LightweightCharts.PriceScaleMode.Percentage
+               : LightweightCharts.PriceScaleMode.Normal,
+    });
+  } catch (e) { /* 尚未初始化 */ }
 }
 function resubOverlays() {
   for (const sym of overlays.keys())
@@ -659,17 +669,18 @@ function ovBasisIdx() {
   } catch (e) { /* 尚无数据 */ }
   return 0;
 }
-function ovReadout(vals, idx, base) {
+function ovReadout(vals, idx, base, sym) {
   if (!vals) return ["—", null];
   const v = vals[idx != null ? idx : vals.length - 1];
   if (v == null) return ["—", null];
   const b = vals[base];
   const pct = (b != null && b) ? (v / b - 1) * 100 : null;
-  return [fmtNum(v), pct];
+  return [fmtNum(v, sym), pct];
 }
-function fmtNum(v) {
-  const a = Math.abs(v);
-  return a >= 5000 ? v.toFixed(0) : a >= 100 ? v.toFixed(1) : v.toFixed(2);
+function fmtNum(v, sym) {
+  const d = priceDigits(sym);          // 按该合约的最小变动价位定小数位
+  if (d != null) return v.toFixed(d);
+  return Math.abs(v) >= 5000 ? v.toFixed(0) : v.toFixed(2);
 }
 function renderOverlayBar() {
   const bar = $("overlay-bar");
@@ -684,7 +695,7 @@ function renderOverlayBar() {
 
   // 基准标的自己也要有读数, 否则没法比
   const mc = lastRows.length ? lastRows.map((r) => r.c) : null;
-  const [mv, mp] = ovReadout(mc, idx, base);
+  const [mv, mp] = ovReadout(mc, idx, base, selected);
   const b0 = document.createElement("span");
   b0.className = "ov-chip base";
   b0.innerHTML = `<i style="background:${C.ma5}"></i>` +
@@ -693,7 +704,7 @@ function renderOverlayBar() {
   bar.appendChild(b0);
 
   for (const [sym, o] of overlays) {
-    const [v, p] = ovReadout(o.vals, idx, base);
+    const [v, p] = ovReadout(o.vals, idx, base, sym);
     const chip = document.createElement("span");
     chip.className = "ov-chip";
     chip.innerHTML = `<i style="background:${o.color}"></i>` +
@@ -708,9 +719,10 @@ function renderOverlayBar() {
   }
   const note = document.createElement("span");
   note.className = "ov-note";
-  note.textContent = idx != null ? "光标处 · 涨跌幅相对可见区间首根" : "最新 · 涨跌幅相对可见区间首根";
-  note.title = "叠加用百分比刻度归一(量级差几十倍, 不归一没法比)。" +
-    "右侧价格轴只对基准标的有效, 叠加标的的价格看这里。";
+  note.textContent = (idx != null ? "光标处" : "最新") + " · 涨跌幅相对可见区间首根(缩放会重算)";
+  note.title = "有叠加时整张图切换为百分比刻度, 两个标的按同一基准(当前可见区间的" +
+    "第一根)归一, 这样量级差几十倍也能比形状。缩放或平移时基准跟着重算。" +
+    "右轴显示的是百分比, 真实价格看这里。";
   bar.appendChild(note);
   const clr = document.createElement("span");
   clr.className = "ov-clear";
@@ -1481,6 +1493,7 @@ function fullRender(rows, key) {
     bollS.lo.setData(toLine(times, b.lo));
   }
   refillOverlays();          // 主图时间栅格变了, 叠加线要按新栅格重铺
+  syncCmpMode();
   if (ind.macd) renderSubChart(rows, times, closes);
   // 悬停时图例要停在悬停那根上, 不能被 120ms 一次的行情刷新拉回最后一根
   const hi = hoverIdx();
