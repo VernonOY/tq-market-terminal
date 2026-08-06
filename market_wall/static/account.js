@@ -104,8 +104,13 @@ table.ac-t .sym:hover{text-decoration:underline}
     return n == null ? "—" : (n * 100).toFixed(d == null ? 2 : d) + "%";
   }
   function visible() {
-    const w = document.getElementById("acct-wrap");
-    return w && !w.classList.contains("hidden");
+    /* ⚠️ 不能再按容器 id 判断: 本视图早就改挂在交易页(#trade-wrap)里了,
+       #acct-wrap 已不存在 —— getElementById 返回 null, visible() 恒 false,
+       于是每帧的增量刷新被静默跳过, 表面症状是「点一下才更新一下」。
+       改成看自己的根节点: 在文档里、且有实际布局盒, 就算可见。
+       这样以后容器再怎么改名/搬家都不会把刷新悄悄关掉。 */
+    if (!root || !root.isConnected) return false;
+    return !!(root.offsetParent || root.getClientRects().length);
   }
   function cur() { return snap[curId] || null; }
   function accMeta(id) { return accounts.find((a) => a.id === id) || null; }

@@ -585,3 +585,16 @@ body {
   animation: mw-spin 0.7s linear infinite;
 }
 @keyframes mw-spin { to { transform: rotate(360deg); } }
+
+/* 叠加条的读数 */
+#overlay-bar .ov-v { color: var(--ink); font-variant-numeric: tabular-nums; margin-left: 6px; }
+#overlay-bar .ov-chip em { font-style: normal; font-size: 11px; margin-left: 5px;
+  font-variant-numeric: tabular-nums; color: var(--muted); }
+#overlay-bar .ov-chip em.up { color: var(--up); }
+#overlay-bar .ov-chip em.dn { color: var(--down); }
+#overlay-bar .ov-chip em.ov-tag { color: var(--muted); }
+#overlay-bar .ov-chip u { text-decoration: none; cursor: pointer; margin-left: 7px;
+  font-size: 10.5px; color: var(--muted); border: 1px solid var(--border);
+  border-radius: 3px; padding: 0 5px; }
+#overlay-bar .ov-chip u:hover { color: var(--ink); border-color: var(--muted); }
+#overlay-bar .ov-note { color: var(--muted); font-size: 10.5px; margin-left: 10px; cursor: help; }

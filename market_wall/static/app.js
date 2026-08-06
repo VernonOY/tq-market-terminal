@@ -552,16 +552,17 @@ function addOverlay(sym) {
   if (sym === selected || overlays.has(sym)) return;
   if (overlays.size >= OVERLAY_COLORS.length) { alert("最多叠加 " + OVERLAY_COLORS.length + " 个标的"); return; }
   const color = OVERLAY_COLORS[overlays.size % OVERLAY_COLORS.length];
-  const series = chart.addLineSeries({
-    color, lineWidth: 2, priceScaleId: "cmp",
-    lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: true,
-  });
+  const o = { color, mode: ovMode(), series: null, raw: null };
+  o.series = mkOverlaySeries(o);
   chart.priceScale("cmp").applyOptions({
+    // 百分比刻度: 按当前可见区间的第一根归一, 平移时基准自动重算。
+    // 两个标的价格量级差几十倍(沪金 926 / 沪银 15000), 只有归一化后形状才可比。
+    // 轴本身不显示 —— 显示了会和主图价格轴混淆, 读数走上方的叠加条。
     mode: LightweightCharts.PriceScaleMode.Percentage,
     scaleMargins: { top: 0.05, bottom: 0.22 },
-    visible: false,                      // 不占版面, 读数走图例
+    visible: false,
   });
-  overlays.set(sym, { series, color });
+  overlays.set(sym, o);
   send({ action: "subscribe", symbol: sym, duration: dataDuration(), overlay: true });
   renderOverlayBar();
 }
@@ -576,6 +577,38 @@ function removeOverlay(sym) {
 function clearOverlays() { for (const s of [...overlays.keys()]) removeOverlay(s); }
 
 /* 主图切换合约/周期时, 叠加线要按新周期重订 */
+/* 叠加形态: 线 或 K线。K线在百分比刻度下同样成立 —— 每根的 OHLC 一起归一。
+   存 localStorage, 换合约后保持。 */
+const OV_MODE_KEY = "mw:ovmode";
+function ovMode() {
+  try { return localStorage.getItem(OV_MODE_KEY) === "candle" ? "candle" : "line"; }
+  catch (e) { return "line"; }
+}
+function mkOverlaySeries(o) {
+  if (o.mode === "candle") {
+    return chart.addCandlestickSeries({
+      priceScaleId: "cmp",
+      upColor: o.color, downColor: "transparent",
+      borderUpColor: o.color, borderDownColor: o.color,
+      wickUpColor: o.color, wickDownColor: o.color,
+      lastValueVisible: false, priceLineVisible: false,
+    });
+  }
+  return chart.addLineSeries({
+    color: o.color, lineWidth: 2, priceScaleId: "cmp",
+    lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: true,
+  });
+}
+function setOverlayMode(sym, mode) {
+  const o = overlays.get(sym);
+  if (!o || o.mode === mode) return;
+  try { chart.removeSeries(o.series); } catch (e) { /* 已销毁 */ }
+  o.mode = mode;
+  o.series = mkOverlaySeries(o);
+  try { localStorage.setItem(OV_MODE_KEY, mode); } catch (e) { /* 忽略 */ }
+  refillOverlay(sym);
+  renderOverlayBar();
+}
 function resubOverlays() {
   for (const sym of overlays.keys())
     send({ action: "subscribe", symbol: sym, duration: dataDuration(), overlay: true });
@@ -596,35 +629,89 @@ function refillOverlay(sym) {
   if (!o || !o.raw) return;
   if (!lastTimes.length) { try { o.series.setData([]); } catch (e) { /* 已销毁 */ } return; }
   const rows = (duration === WEEK || duration === MONTH) ? aggregate(o.raw, duration) : o.raw;
-  const src = rows.map((r) => [r.t + TZ_SHIFT, r.c]).sort((a, b) => a[0] - b[0]);
+  const src = rows.map((r) => [r.t + TZ_SHIFT, r]).sort((a, b) => a[0] - b[0]);
   const out = new Array(lastTimes.length);
-  let j = 0, v = null;
+  const vals = new Array(lastTimes.length);     // 供图例读数用
+  let j = 0, cur = null;
   for (let i = 0; i < lastTimes.length; i++) {
     const t = lastTimes[i];
-    while (j < src.length && src[j][0] <= t) { v = src[j][1]; j++; }
-    // 叠加标的还没开盘的那段给 whitespace(只有 time), 不能给 value:null
-    out[i] = v != null ? { time: t, value: v } : { time: t };
+    while (j < src.length && src[j][0] <= t) { cur = src[j][1]; j++; }
+    vals[i] = cur ? cur.c : null;
+    if (!cur) { out[i] = { time: t }; continue; }   // 还没开盘: whitespace, 不能给 null
+    out[i] = o.mode === "candle"
+      ? { time: t, open: cur.o, high: cur.h, low: cur.l, close: cur.c }
+      : { time: t, value: cur.c };
   }
+  o.vals = vals;
   try { o.series.setData(out); } catch (e) { /* 时间倒退等异常, 下一帧再来 */ }
 }
 function refillOverlays() { for (const sym of overlays.keys()) refillOverlay(sym); }
+/* 叠加条 = 叠加对比的读数区。
+   cmp 轴是隐藏的百分比刻度, 右侧价格轴上的数字**对叠加线不适用** ——
+   不给读数的话用户根本没法判断橙线画的是多少, 只能看个形状。
+   所以这里必须显示: 光标所在那根的真实价格 + 相对可见区间首根的涨跌幅
+   (百分比刻度就是按可见区间首根归一的, 口径要和图上一致)。 */
+function ovBasisIdx() {
+  // 百分比刻度以"当前可见区间的第一根"为 0%, 图例要用同一个基准
+  try {
+    const r = chart.timeScale().getVisibleLogicalRange();
+    if (r) return Math.max(0, Math.min(lastTimes.length - 1, Math.ceil(r.from)));
+  } catch (e) { /* 尚无数据 */ }
+  return 0;
+}
+function ovReadout(vals, idx, base) {
+  if (!vals) return ["—", null];
+  const v = vals[idx != null ? idx : vals.length - 1];
+  if (v == null) return ["—", null];
+  const b = vals[base];
+  const pct = (b != null && b) ? (v / b - 1) * 100 : null;
+  return [fmtNum(v), pct];
+}
+function fmtNum(v) {
+  const a = Math.abs(v);
+  return a >= 5000 ? v.toFixed(0) : a >= 100 ? v.toFixed(1) : v.toFixed(2);
+}
 function renderOverlayBar() {
   const bar = $("overlay-bar");
   if (!bar) return;
   bar.innerHTML = "";
   bar.classList.toggle("hidden", overlays.size === 0);
   if (!overlays.size) return;
-  const base = document.createElement("span");
-  base.className = "ov-chip base";
-  base.innerHTML = `<i style="background:${C.ma5}"></i>${(lastQuotes[selected] || {}).instrument_name || selected} <em>基准</em>`;
-  bar.appendChild(base);
+  const idx = hoverIdx();
+  const base = ovBasisIdx();
+  const mkPct = (p) => p == null ? "" :
+    `<em class="${p > 0 ? "up" : p < 0 ? "dn" : ""}">${p > 0 ? "+" : ""}${p.toFixed(2)}%</em>`;
+
+  // 基准标的自己也要有读数, 否则没法比
+  const mc = lastRows.length ? lastRows.map((r) => r.c) : null;
+  const [mv, mp] = ovReadout(mc, idx, base);
+  const b0 = document.createElement("span");
+  b0.className = "ov-chip base";
+  b0.innerHTML = `<i style="background:${C.ma5}"></i>` +
+    `${(lastQuotes[selected] || {}).instrument_name || selected}` +
+    `<span class="ov-v">${mv}</span>${mkPct(mp)}<em class="ov-tag">基准</em>`;
+  bar.appendChild(b0);
+
   for (const [sym, o] of overlays) {
+    const [v, p] = ovReadout(o.vals, idx, base);
     const chip = document.createElement("span");
     chip.className = "ov-chip";
-    chip.innerHTML = `<i style="background:${o.color}"></i>${(lastQuotes[sym] || {}).instrument_name || sym}<b title="移除">✕</b>`;
+    chip.innerHTML = `<i style="background:${o.color}"></i>` +
+      `${(lastQuotes[sym] || {}).instrument_name || sym}` +
+      `<span class="ov-v">${v}</span>${mkPct(p)}` +
+      `<u title="切换 线/K线">${o.mode === "candle" ? "K" : "线"}</u>` +
+      `<b title="移除">✕</b>`;
+    chip.querySelector("u").onclick = () =>
+      setOverlayMode(sym, o.mode === "candle" ? "line" : "candle");
     chip.querySelector("b").onclick = () => removeOverlay(sym);
     bar.appendChild(chip);
   }
+  const note = document.createElement("span");
+  note.className = "ov-note";
+  note.textContent = idx != null ? "光标处 · 涨跌幅相对可见区间首根" : "最新 · 涨跌幅相对可见区间首根";
+  note.title = "叠加用百分比刻度归一(量级差几十倍, 不归一没法比)。" +
+    "右侧价格轴只对基准标的有效, 叠加标的的价格看这里。";
+  bar.appendChild(note);
   const clr = document.createElement("span");
   clr.className = "ov-clear";
   clr.textContent = "清空叠加";
@@ -1190,6 +1277,7 @@ function initCharts() {
     renderOhlcLegend(hasBar && fromMain ? param.seriesData.get(candleS) : barAt(idx));
     renderMaLegend(idx);
     renderVolLegend(idx);
+    if (overlays.size) renderOverlayBar();      // 叠加读数跟着光标走
     if (ind.macd) renderSubLegend(idx);
     if (!pinned) {
       if (idx == null || !fromMain) hideBarDetail();
@@ -2001,6 +2089,7 @@ function updateDrawCursor(x, y, d) {
     renderOhlcLegend(barAtIdx(idx));
     renderMaLegend(idx);
     renderVolLegend(idx);
+    if (overlays.size) renderOverlayBar();      // 叠加读数跟着光标走
     if (ind.macd) renderSubLegend(idx);
     xhairSyncGuard(() => syncCrosshair(d.t, null));   // 副图十字线跟随
   }

@@ -1417,9 +1417,19 @@ def do_trade_req(action, p):
                 return r
             return ACCT.nav(aid, int(p.get("days") or 0))
         if action == "acct_trades":
-            return ACCT.trades(str(p.get("id", "")), int(p.get("limit") or 200))
+            aid = str(p.get("id", ""))
+            if aid.startswith("strat:"):
+                if STRAT is None:
+                    return {"type": "err", "msg": "策略运行器未启用"}
+                return STRAT.trades(aid, int(p.get("limit") or 200))
+            return ACCT.trades(aid, int(p.get("limit") or 200))
         if action == "acct_orders":
-            return ACCT.orders(str(p.get("id", "")))
+            aid = str(p.get("id", ""))
+            if aid.startswith("strat:"):
+                if STRAT is None:
+                    return {"type": "err", "msg": "策略运行器未启用"}
+                return STRAT.orders(aid)
+            return ACCT.orders(aid)
     if action.startswith("strat"):
         if STRAT is None:
             return {"type": "err", "msg": "策略运行器未启用"}

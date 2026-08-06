@@ -113,8 +113,11 @@ table.st-t tr.hit td{background:rgba(57,135,229,.12)}
   const esc = (s) => String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   function visible() {
-    const w = document.getElementById("strat-wrap");
-    return w && !w.classList.contains("hidden");
+    /* 同 account.js: #strat-wrap 在 89fbcdd「交易页改成账户优先」时就被删了,
+       这里再按 id 找永远是 null → 每帧早退, 净值/持仓看着像卡死。
+       以根节点是否真的在页面上、有没有布局盒为准。 */
+    if (!root || !root.isConnected) return false;
+    return !!(root.offsetParent || root.getClientRects().length);
   }
   /* 策略归属哪个账户: 跟 trade.js 用同一套判定, 否则两边会对不上 */
   function acctIdOf(s) {

@@ -142,12 +142,36 @@ window.TradeView = (function () {
   }
   /* 策略账户的数据在策略状态里, 不在 acct 推送里 —— 合成一份给 AccountView 用,
      否则它按 id 查不到快照, 会一直停在"正在连接账户…" */
+  /* 策略上报的持仓是「一笔一行」的简表(code/方向/手数/开仓价/浮盈bp),
+     AccountView 认的却是 TqSdk 那套 pos_long/pos_short/open_price_long…
+     —— 形状不一样, 得转一次。原来这里直接写死 pos:[], 结果策略明明报了持仓,
+     「持仓」表永远显示"当前无持仓"。日内策略开的都是今仓。 */
+  function posOfStrat(a) {
+    const out = [];
+    for (const s of stratOf(a.id)) {
+      for (const p of (s.positions || [])) {
+        const v = num(p.volume) || 0;
+        if (!v) continue;
+        const long = String(p.direction || "") !== "空";
+        const o = { symbol: p.symbol || p.code, last_price: num(p.last_price),
+                    float_profit: num(p.float_profit), margin: num(p.margin) };
+        const op = num(p.open_price);
+        if (long) { o.pos_long = v; o.pos_long_today = v; o.open_price_long = op; }
+        else { o.pos_short = v; o.pos_short_today = v; o.open_price_short = op; }
+        const bp = num(p.float_bp);
+        if (bp != null) o.float_profit_r = bp / 1e4;   // 浮盈相对开仓价
+        out.push(o);
+      }
+    }
+    return out;
+  }
   function snapFor(id) {
     const a = accMeta(id);
     if (!a) return acctSnap;
     if (a.kind !== "strat") return acctSnap;
+    const pos = posOfStrat(a);
     const o = Object.assign({}, acctSnap);
-    o[id] = { sum: sumOf(a), pos: [], nord: 0 };
+    o[id] = { sum: sumOf(a), pos: pos, nord: pos.length };
     return o;
   }
   function hungOf(a) {
@@ -160,44 +184,72 @@ window.TradeView = (function () {
     return 0;
   }
 
-  /* ---------------- 账户栏 ---------------- */
+  /* ---------------- 账户栏 ----------------
+     ⚠️ 这里**不能每帧重建 DOM**。原来 tick() 每帧 `bar.innerHTML=""` 再整条重建,
+     一个动作同时毁掉两件事:
+       · 视觉上一直在闪
+       · **点击失效** —— mousedown 之后节点就被换掉了, mouseup 落到新节点上,
+         浏览器不判定为 click, 表现就是"点了没反应、要连点好几下才切得动"
+     所以拆成两条路: 结构(账户增减/改名/选中项/挂仓警告)变了才重建, 其余只改数字。 */
+  let accSig = "";
+  function setTxt(n, s) { if (n && n.textContent !== s) n.textContent = s; }
+  function dayPnl(sum) {
+    if (num(sum.balance) != null && num(sum.pre_balance) != null)
+      return sum.balance - sum.pre_balance;
+    if (num(sum.close_profit) != null || num(sum.float_profit) != null)
+      return (num(sum.close_profit) || 0) - (num(sum.commission) || 0)
+        + (num(sum.float_profit) || 0);
+    return null;
+  }
   function renderAccs() {
     const bar = els.accs;
     const list = buildAccounts();
-    if (!list.length) { bar.innerHTML = ""; return; }
+    if (!list.length) { bar.innerHTML = ""; accSig = ""; return; }
     // 策略快照通常比 acct_list 晚到, 这时 list 里还没有策略账户。若此刻就把
     // 持久化的选择重置成 list[0], 用户刷新后永远回到第一个账户。等两边都到齐再兜底。
     if (!curAcct) curAcct = list[0].id;
     else if (gotAccts && gotStrat && !list.some((a) => a.id === curAcct)) curAcct = list[0].id;
-    bar.innerHTML = "";
-    for (const a of list) {
-      const sum = sumOf(a);
-      const hung = hungOf(a);
-      const running = stratOf(a.id).filter((s) => String(s.status || "").includes("run")).length;
-      const t = el("div", "tv-acc" + (a.id === curAcct ? " on" : "") +
-        (a.kind === "real" ? " real" : "") + (a.ok === false ? " dead" : ""));
-      t.dataset.id = a.id;
-      const tag = a.kind === "real" ? '<span class="tv-tag real">实盘</span>'
-        : a.kind === "kq" ? '<span class="tv-tag kq">快期模拟</span>'
-          : '<span class="tv-tag sim">模拟</span>';
-      const day = (num(sum.balance) != null && num(sum.pre_balance) != null)
-        ? sum.balance - sum.pre_balance
-        : (num(sum.close_profit) != null || num(sum.float_profit) != null)
-          ? (num(sum.close_profit) || 0) - (num(sum.commission) || 0) + (num(sum.float_profit) || 0)
-          : null;
-      const ns = stratOf(a.id).length;
-      t.innerHTML = `<div class="n">${a.name || a.id}${tag}` +
-        (hung ? `<span class="tv-tag warn">${hung} 仓未平</span>` : "") + "</div>" +
-        `<div class="b">${money(sum.balance)}</div>` +
-        `<div class="d ${cls(day)}">盈亏 ${signed(day)}</div>` +
-        `<div class="s">${ns ? `${ns} 个策略` + (running ? ` · ${running} 运行中` : "") : "无策略"}</div>`;
-      t.onclick = () => {
-        curAcct = a.id;
-        try { localStorage.setItem("mw:tvacct", curAcct); } catch (e) { /* 忽略 */ }
-        renderAccs(); renderTabs(); renderBody();
-      };
-      bar.appendChild(t);
+
+    const sig = list.map((a) => [a.id, a.name || a.id, a.kind, a.ok === false ? 1 : 0,
+      a.id === curAcct ? 1 : 0, hungOf(a)].join("~")).join("|");
+    if (sig !== accSig) {
+      accSig = sig;
+      bar.innerHTML = "";
+      for (const a of list) {
+        const t = el("div", "tv-acc" + (a.id === curAcct ? " on" : "") +
+          (a.kind === "real" ? " real" : "") + (a.ok === false ? " dead" : ""));
+        t.dataset.id = a.id;
+        const tag = a.kind === "real" ? '<span class="tv-tag real">实盘</span>'
+          : a.kind === "kq" ? '<span class="tv-tag kq">快期模拟</span>'
+            : '<span class="tv-tag sim">模拟</span>';
+        const hung = hungOf(a);
+        t.innerHTML = `<div class="n">${a.name || a.id}${tag}` +
+          (hung ? `<span class="tv-tag warn">${hung} 仓未平</span>` : "") + "</div>" +
+          `<div class="b"></div><div class="d"></div><div class="s"></div>`;
+        t.onclick = () => {
+          if (curAcct === a.id) return;          // 点当前账户不必整页重绘
+          curAcct = a.id;
+          try { localStorage.setItem("mw:tvacct", curAcct); } catch (e) { /* 忽略 */ }
+          renderAccs(); renderTabs(); renderBody();
+        };
+        bar.appendChild(t);
+      }
     }
+    // 每帧只写数字。按下标取节点 —— 上面就是按 list 顺序建的, 且 id 也在签名里,
+    // 顺序一定对得上; 这样不用给带冒号的 id(strat:xxx)做选择器转义。
+    list.forEach((a, i) => {
+      const t = bar.children[i];
+      if (!t || t.dataset.id !== a.id) return;
+      const sum = sumOf(a), day = dayPnl(sum);
+      const ns = stratOf(a.id).length;
+      const run = stratOf(a.id).filter((s) => String(s.status || "").includes("run")).length;
+      setTxt(t.querySelector(".b"), money(sum.balance));
+      const d = t.querySelector(".d");
+      setTxt(d, "盈亏 " + signed(day));
+      if (d && d.className !== "d " + cls(day)) d.className = "d " + cls(day);
+      setTxt(t.querySelector(".s"),
+        ns ? `${ns} 个策略` + (run ? ` · ${run} 运行中` : "") : "无策略");
+    });
   }
 
   /* ---------------- 内部页签 ---------------- */
@@ -219,6 +271,7 @@ window.TradeView = (function () {
 
   /* ---------------- 内容 ---------------- */
   let mounted = { home: false, strat: false, nav: false, pos: false };
+  let ovSig = "", ovNode = null;                 // 概览页: 结构签名 + 根节点
   function renderBody() {
     const b = els.body;
     b.innerHTML = "";
@@ -256,15 +309,32 @@ window.TradeView = (function () {
         n.style.cssText = "position:absolute;left:0;right:0;bottom:0;padding:6px 14px;" +
           "color:var(--muted,#898781);font-size:11px;background:var(--surface,#1a1a19);" +
           "border-top:1px solid var(--border,rgba(255,255,255,.1))";
-        n.textContent = "策略账户跑在子进程里, 终端只拿得到它上报的资金汇总 —— " +
-          "逐仓明细和委托看「策略」页的成交回顾。";
+        n.textContent = "策略账户跑在子进程里, 持仓/委托/成交都是策略自己上报的 —— " +
+          "只在它活着的时候有数据; 进程停了就停在最后一次上报。";
         sec.style.position = "relative";
         sec.appendChild(n);
       }
     } else {
-      sec.appendChild(overview(a));
+      ovNode = overview(a);
+      ovSig = homeSig(a);
+      sec.appendChild(ovNode);
       mounted.home = true;
     }
+  }
+
+  /* 概览的数字。建和刷新共用同一份定义, 免得两处对不上 */
+  function ovItems(sum) {
+    const net = (num(sum.close_profit) || 0) - (num(sum.commission) || 0);
+    return [
+      ["balance", "账户权益", money(sum.balance), ""],
+      ["available", "可用资金", money(sum.available), ""],
+      ["margin", "保证金占用", money(sum.margin), ""],
+      ["float", "浮动盈亏", signed(sum.float_profit), cls(sum.float_profit)],
+      ["close", "平仓盈亏", signed(sum.close_profit), cls(sum.close_profit)],
+      ["fee", "手续费",
+        num(sum.commission) == null ? "—" : "-" + money(sum.commission), ""],
+      ["net", "已落袋", signed(net), cls(net)],
+    ];
   }
 
   /* 概览: 这个账户的资金 + 挂在它下面的策略一览 */
@@ -274,21 +344,11 @@ window.TradeView = (function () {
     const sum = sumOf(a);
     const g = el("div");
     g.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:6px;margin-bottom:14px";
-    const net = (num(sum.close_profit) || 0) - (num(sum.commission) || 0);
-    const items = [
-      ["账户权益", money(sum.balance), ""],
-      ["可用资金", money(sum.available), ""],
-      ["保证金占用", money(sum.margin), ""],
-      ["浮动盈亏", signed(sum.float_profit), cls(sum.float_profit)],
-      ["平仓盈亏", signed(sum.close_profit), cls(sum.close_profit)],
-      ["手续费", num(sum.commission) == null ? "—" : "-" + money(sum.commission), ""],
-      ["已落袋", signed(net), cls(net)],
-    ];
-    for (const [k, v, c] of items) {
+    for (const [k, label, v, c] of ovItems(sum)) {
       const d = el("div");
       d.style.cssText = "background:var(--surface,#1a1a19);border:1px solid var(--border,rgba(255,255,255,.1));border-radius:7px;padding:7px 10px";
-      d.innerHTML = `<div style="color:var(--muted,#898781);font-size:10.5px">${k}</div>` +
-        `<div class="${c}" style="font-size:18px;font-weight:600;font-variant-numeric:tabular-nums">${v}</div>`;
+      d.innerHTML = `<div style="color:var(--muted,#898781);font-size:10.5px">${label}</div>` +
+        `<div class="${c}" data-k="${k}" style="font-size:18px;font-weight:600;font-variant-numeric:tabular-nums">${v}</div>`;
       g.appendChild(d);
     }
     wrap.appendChild(g);
@@ -305,23 +365,18 @@ window.TradeView = (function () {
       return wrap;
     }
     for (const s of ss) {
-      const st = String(s.status || "").toLowerCase();
-      const kind = st.includes("err") ? "error" : st.includes("run") ? "running" : "stopped";
-      const label = kind === "error" ? "异常" : kind === "running" ? "运行中" : "已停止";
-      const o = num((s.stats || {})["已开仓"]) || 0, cN = num((s.stats || {})["已平仓"]) || 0;
       const row = el("div");
+      row.dataset.sid = s.id;
       row.style.cssText = "display:flex;align-items:center;gap:10px;padding:8px 11px;margin-bottom:6px;" +
         "background:var(--surface,#1a1a19);border:1px solid var(--border,rgba(255,255,255,.1));" +
         "border-radius:7px;cursor:pointer;flex-wrap:wrap";
-      const col = kind === "running" ? "var(--down,#199e70)" : kind === "error" ? "var(--up,#e66767)" : "var(--muted,#898781)";
       row.innerHTML =
         `<b style="color:var(--ink,#fff);font-size:13px">${s.name || s.id}</b>` +
-        `<span style="color:${col};font-size:11px">${label}</span>` +
-        `<span style="color:var(--muted,#898781);font-size:11px">${s.phase || ""}</span>` +
+        `<span data-k="lab" style="font-size:11px"></span>` +
+        `<span data-k="phase" style="color:var(--muted,#898781);font-size:11px"></span>` +
         `<span style="flex:1 1 auto"></span>` +
-        `<span style="color:var(--muted,#898781);font-size:11px">开 ${o} / 平 ${cN}</span>` +
-        (kind !== "running" && o > cN
-          ? `<span class="tv-tag warn">${o - cN} 仓未平</span>` : "");
+        `<span data-k="cnt" style="color:var(--muted,#898781);font-size:11px"></span>` +
+        `<span data-k="hung" class="tv-tag warn" style="display:none"></span>`;
       row.onclick = () => {
         curTab = "strat";
         try { localStorage.setItem("mw:tvtab", "strat"); } catch (e) { /* 忽略 */ }
@@ -330,7 +385,42 @@ window.TradeView = (function () {
       };
       wrap.appendChild(row);
     }
+    updateOverview(a, wrap);
     return wrap;
+  }
+
+  /* 概览的每帧刷新: 只改文字, 不动 DOM 结构 */
+  function updateOverview(a, wrap) {
+    const sum = sumOf(a);
+    for (const [k, , v, c] of ovItems(sum)) {
+      const n = wrap.querySelector(`[data-k="${k}"]`);
+      if (!n) continue;
+      setTxt(n, v);
+      if (n.className !== c) n.className = c;
+    }
+    for (const s of stratOf(a.id)) {
+      const row = wrap.querySelector(`[data-sid="${s.id.replace(/"/g, '\\"')}"]`);
+      if (!row) continue;
+      const st = String(s.status || "").toLowerCase();
+      const kind = st.includes("err") ? "error" : st.includes("run") ? "running" : "stopped";
+      const lab = row.querySelector('[data-k="lab"]');
+      setTxt(lab, kind === "error" ? "异常" : kind === "running" ? "运行中" : "已停止");
+      lab.style.color = kind === "running" ? "var(--down,#199e70)"
+        : kind === "error" ? "var(--up,#e66767)" : "var(--muted,#898781)";
+      setTxt(row.querySelector('[data-k="phase"]'), s.phase || "");
+      const o = num((s.stats || {})["已开仓"]) || 0;
+      const cN = num((s.stats || {})["已平仓"]) || 0;
+      setTxt(row.querySelector('[data-k="cnt"]'), `开 ${o} / 平 ${cN}`);
+      const h = row.querySelector('[data-k="hung"]');
+      const show = kind !== "running" && o > cN;
+      setTxt(h, show ? `${o - cN} 仓未平` : "");
+      h.style.display = show ? "" : "none";
+    }
+  }
+
+  /* 概览页的结构签名: 账户 + 它下面的策略集合。只有这个变了才值得重建 DOM */
+  function homeSig(a) {
+    return a.id + "|" + stratOf(a.id).map((s) => s.id).join(",");
   }
 
   function tick() {
@@ -338,11 +428,12 @@ window.TradeView = (function () {
     raf = requestAnimationFrame(() => {
       raf = 0;
       renderAccs();
-      if (curTab === "home") {
+      if (curTab === "home" && mounted.home) {
         const a = accMeta(curAcct);
-        if (a) { els.body.innerHTML = ""; const s = el("div");
-          s.style.cssText = "flex:1 1 auto;min-height:0;min-width:0;display:flex";
-          s.appendChild(overview(a)); els.body.appendChild(s); }
+        if (!a) return;
+        // 结构没变就只刷数字 —— 每帧重建概览同样会闪, 还会把滚动位置顶回顶部
+        if (homeSig(a) !== ovSig || !ovNode || !ovNode.isConnected) renderBody();
+        else updateOverview(a, ovNode);
       }
     });
   }

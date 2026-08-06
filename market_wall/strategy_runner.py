@@ -23,6 +23,7 @@
 没变就不重新读盘、不重新序列化。
 """
 import json
+import math
 import os
 import signal
 import subprocess
@@ -43,6 +44,21 @@ NAV_DIR = Path(os.environ.get("MW_DATA") or Path(__file__).resolve().parent) / "
 PYTHON = str(BASE / ".venv" / "bin" / "python")
 
 STALE_SEC = 90        # 状态文件超过这么久没更新 → 标记为已断线
+
+
+
+
+def _finite(x):
+    """递归把 NaN/Inf 清成 None（二道防线 —— 策略侧已清过，但读到老文件或
+    第三方策略的状态时仍可能带 NaN；json.dumps 会输出裸 NaN，前端 JSON.parse
+    直接抛异常，整条推送作废、所有页面空白）。"""
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    if isinstance(x, dict):
+        return {k: _finite(v) for k, v in x.items()}
+    if isinstance(x, list):
+        return [_finite(v) for v in x]
+    return x
 
 
 class StrategyHub:
@@ -115,7 +131,7 @@ class StrategyHub:
         out = {}
         for p in sorted(STATE_DIR.glob("*.json")):
             try:
-                d = json.loads(p.read_text(encoding="utf-8"))
+                d = _finite(json.loads(p.read_text(encoding="utf-8")))
             except Exception:
                 continue                       # 正在写一半（不该发生，写入是原子的）
             sid = d.get("id") or p.stem
@@ -166,7 +182,8 @@ class StrategyHub:
     # 终端的 AccountHub 只认识 accounts.json 里的账户，不认识策略的进程内账户，
     # 所以这两个接口由策略上报的状态直接供数。
     _POS_COLS = ("code", "symbol", "direction", "volume", "open_price",
-                 "last_price", "float_bp", "hold_min", "open_time")
+                 "last_price", "float_profit", "float_bp", "margin",
+                 "hold_min", "open_time")
     _TRD_COLS = ("code", "side", "z", "entry_time", "entry_price", "entry_passive",
                  "exit_time", "exit_price", "exit_passive")
 
@@ -188,9 +205,15 @@ class StrategyHub:
                 "cols": list(self._TRD_COLS), "rows": rows}
 
     def orders(self, acct_id):
-        """进行中的仓位即未了结的委托 —— 策略不单独维护委托簿。"""
+        """进行中的仓位即未了结的委托 —— 策略不单独维护委托簿。
+
+        ⚠️ 必须滤掉 side==0：night_gap 会把**全部候选品种**（约 35 个）都写进
+        signals 做研究留痕，其中绝大多数没触发阈值、根本没下单。不滤的话
+        委托表会显示 35 笔「永远挂着」的假委托。
+        """
         d = self._one(acct_id) or {}
-        sig = [s for s in (d.get("signals") or []) if s.get("exit_price") is None]
+        sig = [s for s in (d.get("signals") or [])
+               if s.get("exit_price") is None and s.get("side")]
         rows = [[s.get(c) for c in self._TRD_COLS] for s in sig]
         return {"type": "acct_orders", "id": acct_id,
                 "cols": list(self._TRD_COLS), "rows": rows}
@@ -211,7 +234,13 @@ class StrategyHub:
     def log(self, sid, limit=300):
         if not sid:
             return []
-        cands = sorted(LOG_DIR.glob(f"*{sid}*.log")) + sorted(LOG_DIR.glob("run_*.log"))
+        sid = str(sid).split(":", 1)[-1]
+        # 按【策略名匹配 + mtime 最新】选文件。原先 sorted(名字)[-1] 会在
+        # run_20260806.log 和 min_momentum_*.log 之间按字典序选错 ——
+        # 「策略」页的日志会串成另一条策略的。
+        cands = sorted(LOG_DIR.glob(f"*{sid}*.log"), key=lambda x: x.stat().st_mtime)
+        if not cands:
+            cands = sorted(LOG_DIR.glob("*.log"), key=lambda x: x.stat().st_mtime)
         if not cands:
             return ["(无日志文件)"]
         try:
