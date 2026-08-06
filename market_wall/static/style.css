@@ -63,10 +63,10 @@ body {
 .view.hidden { display: none !important; }
 /* 每个视图容器都必须是 flex + 子 section 可收缩, 否则内部的 overflow:auto
    永远不触发(子项被内容撑开), 表现就是"页面拖不动" */
-#board-wrap, #option-wrap, #stock-wrap, #sector-wrap, #multi-wrap, #sboard-wrap, #home-wrap, #watch-wrap, #acct-wrap, #nav-wrap, #strat-wrap { display: flex; }
+#board-wrap, #option-wrap, #stock-wrap, #sector-wrap, #multi-wrap, #sboard-wrap, #home-wrap, #watch-wrap, #trade-wrap { display: flex; }
 #board-wrap > section, #option-wrap > section,
 #stock-wrap > section, #sector-wrap > section, #multi-wrap > section, #sboard-wrap > section, #home-wrap > section, #watch-wrap > section,
-#acct-wrap > section, #nav-wrap > section, #strat-wrap > section {
+#trade-wrap > section {
   flex: 1 1 auto; min-height: 0; min-width: 0; display: flex;
 }
 .conn { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); flex: 0 0 auto; margin-left: auto; }

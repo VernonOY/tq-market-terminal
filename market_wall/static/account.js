@@ -392,9 +392,15 @@ table.ac-t .sym:hover{text-decoration:underline}
   function build() {
     if (!root) return;
     root.innerHTML = "";
-    if (!accounts.length) { root.appendChild(guide()); return; }
-    if (!curId || !accMeta(curId)) curId = accounts[0].id;
-    root.appendChild(buildTabs());
+    if (opts.fixedAccount) {
+      // 外壳已选好账户, 不再显示第二个选择器
+      curId = opts.fixedAccount;
+      if (!accounts.some((a) => a.id === curId)) accounts = [{ id: curId, name: curId, ok: true }];
+    } else {
+      if (!accounts.length) { root.appendChild(guide()); return; }
+      if (!curId || !accMeta(curId)) curId = accounts[0].id;
+      root.appendChild(buildTabs());
+    }
     const meta = accMeta(curId);
     if (meta && !meta.ok) {
       const e = el("div", "ac-empty");
@@ -404,7 +410,9 @@ table.ac-t .sym:hover{text-decoration:underline}
     }
     if (!cur()) {
       root.appendChild(Object.assign(el("div", "ac-empty"),
-        { textContent: "正在连接账户… (TqSdk 首次建连约 40 秒)" }));
+        { textContent: opts.fixedAccount
+          ? "这个账户还没有资金快照"
+          : "正在连接账户… (TqSdk 首次建连约 40 秒)" }));
       return;
     }
     root.appendChild(buildCards());
@@ -457,6 +465,9 @@ table.ac-t .sym:hover{text-decoration:underline}
       if (!rootEl) return false;
       inject();
       host = rootEl; opts = options || {};
+      // 快照随挂载一起传进来, 免得 build() 先跑一次空的再等 update() 补 ——
+      // 那一下会闪一个"正在连接账户…", 对本来就有数据的账户是错的提示
+      if (opts.snapshot) snap = opts.snapshot;
       root = el("div"); root.id = "ac-root";
       host.innerHTML = "";
       host.appendChild(root);

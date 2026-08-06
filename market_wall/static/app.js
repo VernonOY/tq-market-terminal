@@ -141,14 +141,10 @@ function connect() {
       // boardOff 那个 bug 让 board 永远开着。
       if (window.WatchBoard && WatchBoard.isMounted())
         WatchBoard.update(lastQuotes, selected, msg.klines);
-      if (msg.acct) {
-        lastAcct = msg.acct;
-        if (window.AccountView && AccountView.isMounted()) AccountView.update(lastAcct);
-      }
-      if (msg.strat) {
-        lastStrat = msg.strat;
-        if (window.StrategyView && StrategyView.isMounted()) StrategyView.update(lastStrat);
-      }
+      if (msg.acct) lastAcct = msg.acct;
+      if (msg.strat) lastStrat = msg.strat;
+      if ((msg.acct || msg.strat) && window.TradeView && TradeView.isMounted())
+        TradeView.update(lastAcct, lastStrat);
       if ("board" in msg) {
         if (window.Board) Board.update(msg.board);
         if (window.SectorView) SectorView.update(msg.board);
@@ -584,12 +580,34 @@ function resubOverlays() {
   for (const sym of overlays.keys())
     send({ action: "subscribe", symbol: sym, duration: dataDuration(), overlay: true });
 }
+/* 叠加线必须对齐到主标的的时间栅格。
+   lightweight-charts 的时间轴是所有 series 时间点的并集: 直接喂叠加标的自己的
+   时间戳, 主图就会多出主标的没有的那些点(甘醇夜盘到 23:00, 原油到 02:30),
+   于是同一个 logical index 在主图和副图上指向不同的根 —— 副图会被星型同步挤成
+   左边一条竖线。所以只在主标的已有的时间点上出值, 中间用前值填充(forward-fill)。 */
 function applyOverlay(sym, raw) {
   const o = overlays.get(sym);
   if (!o || !raw || !raw.length) return;
-  const rows = (duration === WEEK || duration === MONTH) ? aggregate(raw, duration) : raw;
-  o.series.setData(rows.map((r) => ({ time: r.t + TZ_SHIFT, value: r.c })));
+  o.raw = raw;                       // 主图根数变了要重铺, 存一份原始数据
+  refillOverlay(sym);
 }
+function refillOverlay(sym) {
+  const o = overlays.get(sym);
+  if (!o || !o.raw) return;
+  if (!lastTimes.length) { try { o.series.setData([]); } catch (e) { /* 已销毁 */ } return; }
+  const rows = (duration === WEEK || duration === MONTH) ? aggregate(o.raw, duration) : o.raw;
+  const src = rows.map((r) => [r.t + TZ_SHIFT, r.c]).sort((a, b) => a[0] - b[0]);
+  const out = new Array(lastTimes.length);
+  let j = 0, v = null;
+  for (let i = 0; i < lastTimes.length; i++) {
+    const t = lastTimes[i];
+    while (j < src.length && src[j][0] <= t) { v = src[j][1]; j++; }
+    // 叠加标的还没开盘的那段给 whitespace(只有 time), 不能给 value:null
+    out[i] = v != null ? { time: t, value: v } : { time: t };
+  }
+  try { o.series.setData(out); } catch (e) { /* 时间倒退等异常, 下一帧再来 */ }
+}
+function refillOverlays() { for (const sym of overlays.keys()) refillOverlay(sym); }
 function renderOverlayBar() {
   const bar = $("overlay-bar");
   if (!bar) return;
@@ -958,11 +976,16 @@ function macdCalc(vals, fast = 12, slow = 26, sig = 9) {
    副图之间是按**逻辑下标**同步的, 少几个点就整体错位:
    波动率(前 120 根为 null)会比主图短 120 根, 时间轴对不上。 */
 function toLine(times, arr) {
-  const out = new Array(arr.length);
-  for (let i = 0; i < arr.length; i++)
-    out[i] = (arr[i] != null && isFinite(arr[i]))
-      ? { time: times[i], value: arr[i] }
-      : { time: times[i] };
+  // 长度必须由时间轴说了算, 不能由指标返回的数组说了算。
+  // 某个指标算出来的数组比 times 短(实测 rvPercentile 有 237 vs 300 的情况),
+  // 序列就跟着短一截, 副图时间轴随之偏移, 和主图对不上。缺的补 whitespace。
+  const n = times.length;
+  const out = new Array(n);
+  const a = arr || [];
+  for (let i = 0; i < n; i++) {
+    const v = a[i];
+    out[i] = (v != null && isFinite(v)) ? { time: times[i], value: v } : { time: times[i] };
+  }
   return out;
 }
 
@@ -1369,6 +1392,7 @@ function fullRender(rows, key) {
     bollS.up.setData(toLine(times, b.up));
     bollS.lo.setData(toLine(times, b.lo));
   }
+  refillOverlays();          // 主图时间栅格变了, 叠加线要按新栅格重铺
   if (ind.macd) renderSubChart(rows, times, closes);
   // 悬停时图例要停在悬停那根上, 不能被 120ms 一次的行情刷新拉回最后一根
   const hi = hoverIdx();
@@ -1393,7 +1417,14 @@ function renderSubPane(slotIdx, rows, times, closes) {
   const off = slot.kind === "none" || !ind.macd;
   if (wrap) wrap.classList.toggle("hidden", off);
   if (off) return;
-  const on = (s, v) => s && s.applyOptions({ visible: v });
+  // 只设 visible:false 是不够的 —— 隐藏的序列照样参与时间轴计算, 里面留着
+  // 上一个指标/上一个周期的数据, 会把副图时间轴撑得和主图对不上(实测副图
+  // 三条序列长度变成 237/300/300, 逻辑区间整体偏移 2 根)。用不到的必须清空。
+  const on = (s, v) => {
+    if (!s) return;
+    s.applyOptions({ visible: v });
+    if (!v) { try { s.setData([]); } catch (e) { /* 已销毁 */ } }
+  };
   const k = slot.kind;
   [p.hist, p.dif, p.dea].forEach((s) => on(s, k === "macd"));
   [p.k, p.d, p.j].forEach((s) => on(s, k === "kdj"));
@@ -2163,7 +2194,11 @@ $("periods").addEventListener("click", (e) => {
   hideBarDetail();
   applyModeUI();
   loadDrawings();
+  // 叠加线也要按新周期重订。不重订的话它会拿着旧周期的数据往新时间栅格上
+  // forward-fill, 画出来大半截是条直线。
+  for (const o of overlays.values()) o.raw = null;
   subscribe();
+  resubOverlays();
 });
 /* 分时模式: 隐藏 K 线图/画线/指标, 显示分时渲染器 */
 function applyModeUI() {
@@ -2408,9 +2443,6 @@ function mountStockBoard(tab) {
 }
 
 const BOARD_VIEWS = new Set(["board", "sector", "home"]);
-// 账户快照被 账户/净值分析 两个视图共用, 都离开了才退订
-const ACCT_VIEWS = new Set(["acct", "nav"]);
-function acctOff(next) { if (!ACCT_VIEWS.has(next)) send({ action: "acct_sub", on: false }); }
 // onHide 是在 curView 更新之前调用的, 用 curView 判断等于问"我要离开的这个视图
 // 是不是看板视图" —— 永远为真, board 数据源打开就再也关不掉。必须看目标视图。
 function boardOff(next) { if (!BOARD_VIEWS.has(next)) send({ action: "board", on: false }); }
@@ -2438,34 +2470,24 @@ const VIEWS = {
     },
     onHide: boardOff,
   },
-  acct: {
-    el: "acct-wrap",
+  trade: {
+    el: "trade-wrap",
     onShow() {
       send({ action: "acct_sub", on: true });
-      if (window.AccountView && !AccountView.isMounted())
-        AccountView.mount($("acct-view"), { request, fmtVol, fmtQ, onPick: (sym) => gotoChart(sym) });
-      if (window.AccountView) AccountView.update(lastAcct);
-    },
-    onHide: acctOff,
-  },
-  nav: {
-    el: "nav-wrap",
-    onShow() {
-      send({ action: "acct_sub", on: true });      // 净值分析也要账户列表
-      if (window.NavChart && !NavChart.isMounted()) NavChart.mount($("navchart-view"), { request });
-      else if (window.NavChart) NavChart.refresh();
-    },
-    onHide: acctOff,
-  },
-  strat: {
-    el: "strat-wrap",
-    onShow() {
       send({ action: "strat_sub", on: true });
-      if (window.StrategyView && !StrategyView.isMounted())
-        StrategyView.mount($("strat-view"), { request });
-      if (window.StrategyView) StrategyView.update(lastStrat);
+      if (window.TradeView && !TradeView.isMounted())
+        TradeView.mount($("trade-view"), {
+          request, fmtVol, fmtQ,
+          onPick: (sym) => { showView("chart"); gotoChart(sym); },
+        });
+      if (window.TradeView) TradeView.update(lastAcct, lastStrat);
     },
-    onHide(next) { if (next !== "strat") send({ action: "strat_sub", on: false }); },
+    onHide(next) {
+      if (next !== "trade") {
+        send({ action: "acct_sub", on: false });
+        send({ action: "strat_sub", on: false });
+      }
+    },
   },
   watch: {
     el: "watch-wrap",
@@ -2609,7 +2631,7 @@ const NAV = [
   { grp: "opt", label: "期权", subs: [["option", "T型报价"]] },
   { grp: "stk", label: "A股", subs: [["stkchart", "个股行情"], ["stock", "个股研究"],
                                      ["sboard", "板块"], ["sindex", "指数"]] },
-  { grp: "trade", label: "交易", subs: [["acct", "账户"], ["nav", "净值分析"], ["strat", "策略"]] },
+  { grp: "trade", label: "交易", subs: [["trade", "交易"]] },
 ];
 let curView = "chart", curGrp = "fut";
 const GRP_LAST = { home: "home", fut: "chart", opt: "option", stk: "stkchart" };  // 每个大类各记各的子页

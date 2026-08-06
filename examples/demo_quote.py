@@ -1,11 +1,15 @@
 """TqSdk 入门示例：订阅实时行情
 
-用法: 把快期账户密码填入同目录 tq_auth.env 后运行
-    .venv/bin/python demo_quote.py
+用法: 把快期账户密码填入仓库根目录的 tq_auth.env 后运行
+    .venv/bin/python examples/demo_quote.py
 """
 from tqsdk import TqApi, TqAuth
 
-from tq_auth import load_auth
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 让 tq_auth 可见
+
+from tq_auth import load_auth  # noqa: E402
 
 USER, PASSWORD = load_auth()
 

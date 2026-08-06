@@ -1,7 +1,7 @@
 """TqSdk 回测示例：双均线策略（模拟资金，不动真钱）
 
-用法: 把快期账户密码填入同目录 tq_auth.env 后运行
-    .venv/bin/python demo_backtest.py
+用法: 把快期账户密码填入仓库根目录的 tq_auth.env 后运行
+    .venv/bin/python examples/demo_backtest.py
 
 策略逻辑: 5 日均线在 20 日均线上方持多 1 手，下方空仓。
 标的: DCE.m2501 豆粕具体合约（主连 KQ.m@DCE.m 是指数合约不能下单）。
@@ -14,7 +14,11 @@ from datetime import date
 from tqsdk import TqApi, TqAuth, TqBacktest, TqSim, TargetPosTask, BacktestFinished
 from tqsdk.tafunc import ma
 
-from tq_auth import load_auth
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 让 tq_auth 可见
+
+from tq_auth import load_auth  # noqa: E402
 
 USER, PASSWORD = load_auth()
 

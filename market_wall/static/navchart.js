@@ -140,10 +140,13 @@ window.NavChart = (function () {
     const p2 = el("div", "nv-p dd");
     p2.innerHTML = '<div class="t"><b>回撤</b> · 距历史峰值的百分比</div>';
     const c2 = el("div", "c"); p2.appendChild(c2);
+    const p4 = el("div", "nv-p dd");
+    p4.innerHTML = '<div class="t"><b>浮动盈亏</b> · 未平仓位的账面盈亏, 平仓前都会变</div>';
+    const c4 = el("div", "c"); p4.appendChild(c4);
     const p3 = el("div", "nv-p daily");
     p3.innerHTML = '<div class="t"><b>日盈亏</b> · 按自然日归并</div>';
     const c3 = el("div", "c"); p3.appendChild(c3);
-    wrap.append(p1, p2, p3);
+    wrap.append(p1, p2, p4, p3);
 
     const ch1 = LightweightCharts.createChart(c1, baseOpts(c1.clientHeight || 220));
     const eq = ch1.addLineSeries({ color: cssVar("--ma5", "#3987e5"), lineWidth: 2, title: "权益" });
@@ -152,6 +155,11 @@ window.NavChart = (function () {
     const dd = ch2.addAreaSeries({
       lineColor: down, topColor: "rgba(25,158,112,.05)", bottomColor: "rgba(25,158,112,.35)",
       lineWidth: 1, priceFormat: { type: "percent" },
+    });
+    const ch4 = LightweightCharts.createChart(c4, baseOpts(c4.clientHeight || 110));
+    const fpS = ch4.addAreaSeries({
+      lineColor: cssVar("--ma5", "#3987e5"), lineWidth: 1,
+      topColor: "rgba(57,135,229,.28)", bottomColor: "rgba(57,135,229,.02)",
     });
     const ch3 = LightweightCharts.createChart(c3, baseOpts(c3.clientHeight || 110));
     const dl = ch3.addHistogramSeries({ priceFormat: { type: "volume" } });
@@ -170,7 +178,15 @@ window.NavChart = (function () {
       peak = Math.max(peak, b);
       ddD.push({ time: t, value: peak > 0 ? (b - peak) / peak : 0 });
     }
-    eq.setData(eqD); av.setData(avD); dd.setData(ddD);
+    const fpD = [];
+    last = null;
+    for (const r of points) {
+      const t = Math.round(r[0]) + TZ;
+      if (last === t) continue;
+      last = t;
+      if (num(r[4]) != null) fpD.push({ time: t, value: r[4] });
+    }
+    eq.setData(eqD); av.setData(avD); dd.setData(ddD); fpS.setData(fpD);
 
     /* 日盈亏: 按自然日取每日最后一条权益做差 */
     const byDay = new Map();
@@ -193,24 +209,24 @@ window.NavChart = (function () {
     const push = (r) => {
       if (syncing || !r) return;
       syncing = true;
-      for (const c of [ch2, ch3]) {
+      for (const c of [ch2, ch3, ch4]) {
         try { c.timeScale().setVisibleLogicalRange(r); } catch (e) { /* 尚无数据 */ }
       }
       syncing = false;
     };
     ch1.timeScale().subscribeVisibleLogicalRangeChange(push);
 
-    charts = [{ chart: ch1 }, { chart: ch2 }, { chart: ch3 }];
+    charts = [{ chart: ch1 }, { chart: ch2 }, { chart: ch3 }, { chart: ch4 }];
     if (window.ResizeObserver) {
       ro = new ResizeObserver(() => {
-        for (const [c, box] of [[ch1, c1], [ch2, c2], [ch3, c3]]) {
+        for (const [c, box] of [[ch1, c1], [ch2, c2], [ch3, c3], [ch4, c4]]) {
           if (box.clientWidth && box.clientHeight) c.resize(box.clientWidth, box.clientHeight);
         }
       });
-      ro.observe(c1); ro.observe(c2); ro.observe(c3);
+      ro.observe(c1); ro.observe(c2); ro.observe(c3); ro.observe(c4);
     }
     requestAnimationFrame(() => {
-      for (const [c, box] of [[ch1, c1], [ch2, c2], [ch3, c3]]) {
+      for (const [c, box] of [[ch1, c1], [ch2, c2], [ch3, c3], [ch4, c4]]) {
         if (box.clientWidth && box.clientHeight) c.resize(box.clientWidth, box.clientHeight);
       }
       ch1.timeScale().fitContent();
@@ -220,11 +236,13 @@ window.NavChart = (function () {
   /* ---------------- 组装 ---------------- */
   function toolbar() {
     const bar = el("div", "nv-bar");
-    if (accounts.length > 1) {
+    // 外壳已经选好账户了, 这里不该再出现第二个账户选择器
+    if (!opts.fixedAccount && accounts.length > 1) {
       bar.appendChild(Object.assign(el("span", "nv-lab"), { textContent: "账户" }));
       for (const a of accounts) {
         const b = el("button", "nv-btn" + (a.id === curId ? " on" : ""));
-        b.textContent = a.name || a.id;
+        // 策略跑在各自独立的模拟账户上, 和终端自带账户不是一回事, 标出来
+        b.textContent = (a.kind === "strat" ? "策略·" : "") + (a.name || a.id);
         b.onclick = () => { curId = a.id; load(); };
         bar.appendChild(b);
       }
@@ -288,7 +306,12 @@ window.NavChart = (function () {
     if (!opts.request) return;
     opts.request("acct_list", {}).then((r) => {
       accounts = (r && r.accounts) || [];
-      if (!curId && accounts.length) curId = accounts[0].id;
+      if (!curId && accounts.length) {
+        // 终端自带的 sim 账户没人交易, 默认选它的话打开永远是一条直线。
+        // 有策略账户就优先选第一个策略。
+        const st = accounts.find((a) => a.kind === "strat");
+        curId = (st || accounts[0]).id;
+      }
       load();
     }).catch(() => build());
   }
@@ -301,8 +324,8 @@ window.NavChart = (function () {
       root = el("div"); root.id = "nv-root";
       host.innerHTML = "";
       host.appendChild(root);
-      build();
-      pullAccounts();
+      if (opts.fixedAccount) { curId = opts.fixedAccount; build(); load(); }
+      else { build(); pullAccounts(); }
       return true;
     },
     setAccount(id) { if (id && id !== curId) { curId = id; load(); } },

@@ -1166,6 +1166,25 @@ async def index_handler(request):
                         headers={"Cache-Control": "no-store"})
 
 
+def _refresh_gz(src):
+    """源文件比 .gz 新就重压。
+    aiohttp 的 FileResponse 只要请求头带 Accept-Encoding: gzip 就自动挑同名 .gz,
+    而且**不比对 mtime** —— 只在启动时压一次的话, 服务运行期间改过的文件会永远
+    发旧包。浏览器一律带这个头, curl 默认不带, 于是"用 curl 验证发出的是新代码"
+    会骗过自己。这个坑很难查, 所以按请求校验, 一次 stat 的开销可以接受。"""
+    import gzip
+    gz = src.with_suffix(src.suffix + ".gz")
+    try:
+        if gz.exists() and gz.stat().st_mtime >= src.stat().st_mtime:
+            return
+        gz.write_bytes(gzip.compress(src.read_bytes(), 9))
+    except OSError:
+        try:
+            gz.unlink()       # 压不了就把旧的删掉, 宁可不压也不能发错版本
+        except OSError:
+            pass
+
+
 def precompress_static():
     """启动时把 static 下的 js/css 预压成同名 .gz。
     aiohttp 的 FileResponse 在 Accept-Encoding 含 gzip 时会自动挑同名 .gz 走
@@ -1190,6 +1209,10 @@ def precompress_static():
 
 @web.middleware
 async def no_cache_static(request, handler):
+    if request.path.startswith("/static/") and request.path.endswith((".js", ".css")):
+        src = STATIC_DIR / request.path[len("/static/"):]
+        if src.is_file():
+            _refresh_gz(src)
     resp = await handler(request)
     if request.path.startswith("/static/"):
         # 带 ?v= 的请求可以放心长缓存; 不带的(旧页面留下的)必须每次回源校验
@@ -1366,12 +1389,33 @@ def do_optunderlyings(api):
 def do_trade_req(action, p):
     """账户/策略的请求-响应。都是读内存或小文件, 直接在事件循环里跑。"""
     if action.startswith("acct"):
-        if ACCT is None:
+        if ACCT is None and not str(p.get("id", "")).startswith("strat:"):
             return {"type": "err", "msg": "账户监控未启用(检查 market_wall/account.py 与 accounts.json)"}
         if action == "acct_list":
-            return {"type": "acct_list", "accounts": ACCT.list_accounts()}
+            accs = ACCT.list_accounts()
+            # 策略跑在各自独立的 TqSim 上, 和终端自带账户是不同的账户 ——
+            # 不把它们列出来的话, 净值分析永远只能看到那条没人交易的直线
+            if STRAT is not None:
+                for it in STRAT.list():
+                    if not isinstance(it, dict):
+                        continue
+                    acc = STRAT.norm_account(it.get("account"))
+                    if acc.get("balance") is None:
+                        continue
+                    accs.append({"id": "strat:" + str(it.get("id")),
+                                 "kind": "strat", "name": (it.get("name") or it.get("id")),
+                                 "acct": "", "broker": "", "ok": True, "err": "",
+                                 "init_balance": None, "stock": False})
+            return {"type": "acct_list", "accounts": accs}
         if action == "acct_nav":
-            return ACCT.nav(str(p.get("id", "")), int(p.get("days") or 0))
+            aid = str(p.get("id", ""))
+            if aid.startswith("strat:"):
+                if STRAT is None:
+                    return {"type": "err", "msg": "策略运行器未启用"}
+                r = STRAT.nav(aid[6:], int(p.get("days") or 0))
+                r["id"] = aid
+                return r
+            return ACCT.nav(aid, int(p.get("days") or 0))
         if action == "acct_trades":
             return ACCT.trades(str(p.get("id", "")), int(p.get("limit") or 200))
         if action == "acct_orders":

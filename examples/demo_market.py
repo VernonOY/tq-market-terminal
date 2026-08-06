@@ -1,12 +1,16 @@
 """TqSdk 看行情示例：实时盘口 + K线图（带图形界面）
 
-用法: .venv/bin/python demo_market.py
+用法: .venv/bin/python examples/demo_market.py
 图表: http://127.0.0.1:9879  (和回测的 9878 端口错开, 可同时运行)
 按 Ctrl+C 退出。
 """
 from tqsdk import TqApi, TqAuth
 
-from tq_auth import load_auth
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 让 tq_auth 可见
+
+from tq_auth import load_auth  # noqa: E402
 
 USER, PASSWORD = load_auth()
 

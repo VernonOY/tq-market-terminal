@@ -22,3 +22,6 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# 本地发布工装, 不公开(含私有仓库路径)
+publish.sh
