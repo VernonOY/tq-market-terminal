@@ -9,6 +9,8 @@ Python backend, zero-dependency frontend (only lightweight-charts is vendored), 
 Shinny discontinued their official VSCode plugin. If you want a market panel you can
 **actually modify**, you have to build it yourself — that's where this came from.
 
+![Main chart and HF metrics](docs/01-chart.png)
+
 > The Chinese README is the primary document; this is a translation. Where they disagree,
 > [README.md](README.md) is authoritative.
 
@@ -59,6 +61,8 @@ library on first import, and **falls back to a pure-Python implementation if com
 fails** — nothing is missing, it's just slower. So a fresh clone runs immediately with no
 build step.
 
+That right-hand column is computed in C++ and refreshes with every tick.
+
 Three volatility estimators are available: Garman-Klass / Parkinson / close-to-close.
 The first two use intraday highs and lows and are far more efficient on the same sample.
 
@@ -78,11 +82,18 @@ The first two use intraday highs and lows and are far more efficient on the same
 - **Drawing**: trendline / horizontal / vertical / rectangle / text, with candle snapping
   (hold Alt to suspend) — and you **can draw into the empty space to the right of the last bar**
 
+![Watchlist section board](docs/03-watchboard.png)
+
+*One screen: precious metals as cards, ferrous as mini-charts, energy/chemicals as a heatmap,
+base metals as a table — each section configured independently.*
+
 **Comparison overlay**: adding a second instrument switches the whole chart to percentage
 scale, with both normalized against **the first bar of the current visible range** — the basis
 recomputes as you zoom or pan. Gold at 929 and silver at 15000 differ by 16×; without
 normalization there is nothing to compare. Overlays render as line or candles, and actual
 prices are read from the legend.
+
+![Comparison overlay](docs/02-overlay.png)
 
 ### 3. Programmatic trading and paper accounts
 
@@ -107,6 +118,8 @@ under one account.
 
 Supports `TqSim` (local paper, no credentials), `TqKq` (Shinny paper), and `TqAccount`
 (live account, read-only monitoring).
+
+![Equity analysis](docs/05-trade.png)
 
 ---
 
@@ -147,6 +160,8 @@ locally in milliseconds.
 index options, chosen automatically by contract type; forward inferred per expiry via put-call
 parity (with a sanity gate); IV price source degrades in tiers (mid → one-sided → last →
 settlement); volatility smile / open-interest distribution / volatility surface.
+
+![Option chain](docs/04-options.png)
 
 **A-shares**: per-stock valuation, three financial statements, money flow, dragon-tiger list,
 chip distribution, shareholders, margin trading, block trades (via Tushare); sector boards
