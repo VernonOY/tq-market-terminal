@@ -156,6 +156,8 @@ SYMBOL_SET = set()
 OPTION_SEEN = set()   # 期权链登记过的期权代码(旁路白名单, 不进 7071 条主索引)
 INDEX_READY = threading.Event()
 BAD_SYMBOLS = set()   # 订阅失败过的合约, 不再重试(否则每次都要等 30s 超时, 会卡死采集循环)
+FAIL_COUNT = {}       # 合约 -> 连续失败次数。索引里有的合约要连错 3 次才拉黑
+BAD_HEAL_SEC = 120    # 每 2 分钟把「索引里有的」从黑名单里放出来重试一次
 
 BOARD_ITEMS = []          # [{"s","u","n","ex","cats","catNames","night"}]
 BOARD_META_JSON = '{"type":"board_meta","items":[]}'
@@ -780,6 +782,9 @@ def tq_worker():
                     REG_TICKS.discard(s)
             print(f"[tq] 已连接, 行情{len(quotes)} K线{len(klines)} Tick{len(ticks)}", flush=True)
             set_status(True)
+            # 重连成功 = 之前那些失败多半是断线造成的, 计数清零重新给机会
+            FAIL_COUNT.clear()
+            last_heal = [0.0]
 
             while True:
                 t_round = time.time()
@@ -826,13 +831,29 @@ def tq_worker():
                             if sym not in wl:
                                 quotes.pop(sym, None)
                     except Exception as e:
-                        # 拉黑: 不存在的合约每次都要等 30s 超时, 重试会拖死整个采集循环
+                        # ⚠️ 一次异常就永久拉黑是错的。**断线重连的那一瞬间，任何订阅
+                        # 指令都会抛异常** —— 2026-08-07 终端断了 55 次(本机代理在掐
+                        # 长连接)，KQ.m@INE.sc 这种索引里明明存在的合约就这么被永久
+                        # 拉黑了，表现是盘口有数据、K 线一片空白，刷新多少次都没用。
+                        #
+                        # 现在区分两种失败：
+                        #   索引里没有 → 合约真不存在，get_quote 要干等 30s，立刻拉黑
+                        #   索引里有   → 多半是网络抖动，连错 3 次才拉黑，且会定期放出来重试
                         if sym0:
-                            BAD_SYMBOLS.add(sym0)
-                            REG_QUOTES.discard(sym0)
-                            REG_TICKS.discard(sym0)
-                            REG_KLINES.pop((sym0, c.get("duration")), None)
-                        print(f"[tq] 指令失败 {c}: {e} (已拉黑 {sym0})", flush=True)
+                            n = FAIL_COUNT.get(sym0, 0) + 1
+                            FAIL_COUNT[sym0] = n
+                            with index_lock:
+                                indexed = bool(SYMBOL_SET) and sym0 in SYMBOL_SET
+                            if indexed and n < 3:
+                                print(f"[tq] 指令失败 {c}: {e} "
+                                      f"({sym0} 第 {n} 次, 索引里有, 暂不拉黑)", flush=True)
+                            else:
+                                BAD_SYMBOLS.add(sym0)
+                                REG_QUOTES.discard(sym0)
+                                REG_TICKS.discard(sym0)
+                                REG_KLINES.pop((sym0, c.get("duration")), None)
+                                print(f"[tq] 指令失败 {c}: {e} "
+                                      f"(已拉黑 {sym0}, 连错 {n} 次)", flush=True)
 
                 # ---- 看板订阅(元数据就绪后一次性挂上 88 个主连) ----
                 if REG_BOARD["on"] and BOARD_READY.is_set() and not board_objs:
@@ -847,6 +868,21 @@ def tq_worker():
                         board_objs.clear()
 
                 now = time.monotonic()
+
+                # ---- 黑名单自愈 ----
+                # 网络抖动误伤的合约必须能自己回来。没有这一步的话, 一次断线就够让
+                # 一个正常合约整晚打不开 K 线, 而用户唯一的补救手段是重启终端。
+                # 索引里有的才放, 真不存在的合约留在黑名单里(它们会干等 30s 超时)。
+                if BAD_SYMBOLS and now - last_heal[0] > BAD_HEAL_SEC:
+                    last_heal[0] = now
+                    with index_lock:
+                        back = {s for s in BAD_SYMBOLS if SYMBOL_SET and s in SYMBOL_SET}
+                    if back:
+                        BAD_SYMBOLS.difference_update(back)
+                        for s in back:
+                            FAIL_COUNT.pop(s, None)
+                        print(f"[tq] 黑名单自愈, 放回 {len(back)} 个: "
+                              f"{sorted(back)[:5]}", flush=True)
 
                 # ---- LRU 淘汰 ----
                 for key, (serial, ln) in list(klines.items()):

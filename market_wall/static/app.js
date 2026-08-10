@@ -79,10 +79,50 @@ function dataDuration() {
 function isTimeShare() { return duration === TIMESHARE; }
 
 /* ================= WebSocket ================= */
+/* 断线重连。原来是固定 2s 死循环重试, 且重连后只 subscribe() 恢复主图 ——
+   叠加对比 / 逐笔 / board 数据源 / 多图 / 自选看板的多图分区 / 交易页订阅
+   全部静默丢失: 图还挂在那儿但再也不更新, 界面上没有任何提示。
+   现在改成指数退避 + 完整状态重放。 */
+let reconnDelay = 1000, reconnTimer = 0;
+const RECONN_MAX = 20000;
+/* 重连后把这条连接上的所有订阅重新说一遍。
+   服务端的 conn 状态是每连接独立的, 断开即清零 —— 不重放就等于只剩主图。 */
+function replayState() {
+  try {
+    if (selected) subscribe();
+    resubOverlays();
+    if (BOARD_VIEWS.has(curView)) send({ action: "board", on: true });
+    if (curView === "trade") {
+      send({ action: "acct_sub", on: true });
+      send({ action: "strat_sub", on: true });
+    }
+    if (window.MultiView && MultiView.isMounted())
+      MultiView.subs().forEach(([s2, d]) =>
+        send({ action: "subscribe", symbol: s2, duration: d, overlay: true }));
+    if (window.WatchBoard && WatchBoard.isMounted())
+      WatchBoard.subs().forEach(([s2, d]) =>
+        send({ action: "subscribe", symbol: s2, duration: d, overlay: true }));
+  } catch (e) {
+    setHistHint("恢复订阅时出错: " + e.message, 5000);
+  }
+}
+
 function connect() {
+  clearTimeout(reconnTimer);
   ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => setConn("ok", "已连接");
-  ws.onclose = () => { setConn("err", "已断开, 2s 后重连"); setTimeout(connect, 2000); };
+  ws.onopen = () => {
+    setConn("ok", "已连接");
+    if (reconnDelay > 1000) setHistHint("已重连, 正在恢复订阅…", 2500);
+    reconnDelay = 1000;
+    replayState();
+  };
+  ws.onclose = () => {
+    setConn("err", `已断开, ${Math.round(reconnDelay / 1000)}s 后重连`);
+    // 挂起的请求必须当场失败, 否则会一直吊着(loadMoreHistory 的超时是 180s)
+    failPending("连接已断开");
+    reconnTimer = setTimeout(connect, reconnDelay);
+    reconnDelay = Math.min(RECONN_MAX, Math.round(reconnDelay * 1.8));
+  };
   ws.onerror = () => ws.close();
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
@@ -169,6 +209,15 @@ function request(action, payload, timeoutMs = 60000) {
     pending.set(req, { resolve, reject, timer });
     send(Object.assign({ action, req }, payload || {}));
   });
+}
+/* 断线时把挂起的请求全部判失败。不这么做的话调用方会一直等到自己的超时 ——
+   loadMoreHistory 给的是 180 秒, 期间界面停在"正在加载更早的历史…"一动不动。 */
+function failPending(reason) {
+  for (const [, p] of pending) {
+    clearTimeout(p.timer);
+    try { p.reject(new Error(reason)); } catch (e) { /* 调用方没接 catch */ }
+  }
+  pending.clear();
 }
 function settleRequest(msg) {
   const p = pending.get(msg.req);
