@@ -175,14 +175,24 @@ window.TradeView = (function () {
     return o;
   }
   function hungOf(a) {
+    /* 判据用权威信号: 策略上报的持仓数组 / 保证金。
+       各策略的 stats 键不统一(night_gap 没有「已平仓」), 用计数差会误报。 */
     for (const s of stratOf(a.id)) {
       const st = String(s.status || "").toLowerCase();
-      const dead = st.includes("err") || st.includes("stop") || st.includes("disconn");
-      const o = num((s.stats || {})["已开仓"]) || 0, c = num((s.stats || {})["已平仓"]) || 0;
-      if (dead && o > c) return o - c;
+      const dead = st.includes("err") || st.includes("stop") || st.includes("disconn")
+        || st.includes("done");
+      if (!dead) continue;
+      const nPos = Array.isArray(s.positions) ? s.positions.length : null;
+      if (nPos != null) { if (nPos > 0) return nPos; continue; }
+      const mg = num(normAcc(s.account).margin);
+      if (mg != null) { if (mg > 0) return 1; continue; }
+      const o = num((s.stats || {})["已开仓"]) || 0;
+      const c = num((s.stats || {})["已平仓"]);
+      if (c != null && o > c) return o - c;
     }
     return 0;
   }
+
 
   /* ---------------- 账户栏 ----------------
      ⚠️ 这里**不能每帧重建 DOM**。原来 tick() 每帧 `bar.innerHTML=""` 再整条重建,

@@ -212,11 +212,26 @@ table.st-t tr.hit td{background:rgba(57,135,229,.12)}
     const c = el("div", "st-run" + (isCur ? " on" : ""));
     c.dataset.id = x.id;
     c.onclick = () => { curId = x.id; logLines = []; logFor = null; build(); };
-    // 策略死了但仓位还在, 是最危险的状态 —— 灰字 error 根本注意不到
+    /* 策略死了但仓位还在 —— 最危险的状态, 要比灰字 error 显眼得多。
+       但判据必须用**权威信号**: 持仓数组 / 保证金。
+       原来靠 已开仓 > 已平仓 推断, 而各策略上报的 stats 键并不统一 ——
+       night_gap 压根没有「已平仓」这个键, 取不到当 0, 于是 14 笔全平了也报
+       「14 个仓位未平」。误报比不报更糟: 它会让人怀疑真正的告警。 */
     const [k0] = [kind];
-    const openN = num(x.stats && (x.stats["已开仓"] ?? x.stats.opened)) || 0;
-    const closeN = num(x.stats && (x.stats["已平仓"] ?? x.stats.closed)) || 0;
-    const hung = (k0 === "error" || k0 === "stopped" || k0 === "stale") && openN > closeN;
+    const dead = k0 === "error" || k0 === "stopped" || k0 === "stale";
+    const acc0 = normAcc(x.account);
+    const marg = num(acc0.margin);
+    const nPos = Array.isArray(x.positions) ? x.positions.length : null;
+    let openLeft = 0;
+    if (nPos != null) openLeft = nPos;                       // 策略明确报了持仓
+    else if (marg != null) openLeft = marg > 0 ? 1 : 0;      // 退而求其次看保证金
+    else {                                                   // 两者都没有才用计数差
+      const o = num((x.stats || {})["已开仓"]) || 0;
+      const c = num((x.stats || {})["已平仓"]);
+      openLeft = c == null ? 0 : Math.max(0, o - c);
+    }
+    const hung = dead && openLeft > 0;
+    const openN = openLeft, closeN = 0;
     if (hung) c.classList.add("hung");
     const top = el("div", "top");
     top.innerHTML = `<span class="nm">${esc(x.name || x.id)}</span>` +
@@ -237,7 +252,7 @@ table.st-t tr.hit td{background:rgba(57,135,229,.12)}
     c.appendChild(top);
     if (hung) {
       const w = el("div", "st-hung");
-      w.innerHTML = `<b>⚠ 策略已停止, 但还有 ${openN - closeN} 个仓位未平</b>` +
+      w.innerHTML = `<b>⚠ 策略已停止, 但还有 ${openLeft} 个仓位未平</b>` +
         `<div>模拟盘(TqSim)的账户随进程消失, 本次结果作废。` +
         `如果是实盘或快期模拟(TqKq), 这些仓位仍然挂在市场上, 需要手动处理。</div>`;
       c.appendChild(w);
